@@ -22,40 +22,24 @@ from pysnmp.proto.rfc1902 import Integer32
 # SNMP exception values returned inside varBinds (not as errorIndication/errorStatus)
 from pysnmp.proto.rfc1905 import NoSuchInstance, NoSuchObject, EndOfMibView
 
-# Core auth protocols — available in all pysnmp 6.x builds
+# All auth/priv protocol constants are guaranteed present in pysnmp >= 7.0
 from pysnmp.hlapi.v3arch import (
     usmNoAuthProtocol,
     usmHMACMD5AuthProtocol,
     usmHMACSHAAuthProtocol,
+    usmHMAC128SHA224AuthProtocol,
+    usmHMAC192SHA256AuthProtocol,
+    usmHMAC256SHA384AuthProtocol,
+    usmHMAC384SHA512AuthProtocol,
     usmNoPrivProtocol,
     usmDESPrivProtocol,
     usmAesCfb128Protocol,
+    usmAesCfb192Protocol,
+    usmAesCfb256Protocol,
 )
-
-# Extended SHA-2 auth protocols — present in pysnmp 6.x but guard anyway
-try:
-    from pysnmp.hlapi.v3arch import (
-        usmHMAC128SHA224AuthProtocol,
-        usmHMAC192SHA256AuthProtocol,
-        usmHMAC256SHA384AuthProtocol,
-        usmHMAC384SHA512AuthProtocol,
-    )
-except ImportError:
-    usmHMAC128SHA224AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
-    usmHMAC192SHA256AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
-    usmHMAC256SHA384AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
-    usmHMAC384SHA512AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
-
-# Extended AES priv protocols — guard for the same reason
-try:
-    from pysnmp.hlapi.v3arch import usmAesCfb192Protocol, usmAesCfb256Protocol
-except ImportError:
-    usmAesCfb192Protocol = usmAesCfb128Protocol  # type: ignore[assignment]
-    usmAesCfb256Protocol = usmAesCfb128Protocol  # type: ignore[assignment]
 
 from .const import (
     OID_OUTLET_NAME,
-    OID_OUTLET_STATUS,
     OID_OUTLET_CONTROL,
     OID_LOAD_AMPS,
     OID_LOAD_STATE,
@@ -87,6 +71,22 @@ PRIV_PROTOCOL_MAP = {
     "AES-256": usmAesCfb256Protocol,
 }
 
+# (OID, result-key, is_integer) for the single bulk GET in get_device_ident()
+_IDENT_FIELDS: list[tuple[str, str, bool]] = [
+    (OID_IDENT_NAME,             "name",             False),
+    (OID_IDENT_MODEL,            "model",            False),
+    (OID_IDENT_SERIAL,           "serial",           False),
+    (OID_IDENT_FIRMWARE,         "firmware",         False),
+    (OID_IDENT_DATE_OF_MANUFACTURE, "manufacture_date", False),
+    (OID_IDENT_NUM_OUTLETS,      "num_outlets",      True),
+]
+
+
+def _decode_octet_string(val) -> str:
+    """Decode a pysnmp OctetString / DisplayString value to a plain string."""
+    raw: bytes = val.asOctets() if hasattr(val, "asOctets") else bytes(val)
+    return raw.rstrip(b"\x00").decode("ascii", errors="replace").strip()
+
 
 class APCPDUClient:
     """Thin async wrapper around SNMPv3 GET/SET for APC PDU outlets."""
@@ -104,6 +104,8 @@ class APCPDUClient:
         self._host = host
         self._port = port
         self._engine = SnmpEngine()
+        self._preload_dispatch_mibs()
+
         self._auth = UsmUserData(
             username,
             authKey=auth_key or None,
@@ -113,127 +115,262 @@ class APCPDUClient:
         )
         self._context = ContextData()
         # Serialise all SNMP operations — the shared SnmpEngine is not safe for
-        # concurrent use.  Without this lock a coordinator poll (8 sequential GETs)
-        # racing with a SET corrupts the engine's request-id tracking and one or
-        # both operations silently receive no response.
+        # concurrent use.  Without this lock a coordinator poll racing with a
+        # SET corrupts the engine's request-id tracking.
         self._lock = asyncio.Lock()
         # Cached transport — created once on first use and reused thereafter.
-        # Cleared by close() so a new instance is built if the client is ever
-        # reused after teardown.
         self._transport_cache: UdpTransportTarget | None = None
 
-    async def _transport(self) -> UdpTransportTarget:
-        """Return a cached transport target, creating it on first call.
+    def _preload_dispatch_mibs(self) -> None:
+        """Pre-load the MIBs that pysnmp's message dispatcher uses internally.
 
-        pysnmp 7.x requires ``await UdpTransportTarget.create()`` — the
-        bare constructor is not sufficient.
+        pysnmp's ``receive_message`` (rfc3412) calls
+        ``mib_instrum_controller.get_mib_builder().import_symbols(
+            "__SNMPv2-MIB", "snmpInPkts", ...)``
+        on *every* received packet to update SNMP statistics counters.
+
+        ``import_symbols`` checks ``self.mibSymbols`` before doing any I/O —
+        if the module is already there it returns immediately.  Loading here
+        (inside ``__init__``, which is called from an executor thread) populates
+        ``mibSymbols`` so that all event-loop callbacks are instant cache hits
+        with no file I/O and no HA blocking-call warnings.
+
+        The correct pysnmp 7.x API is ``get_mib_builder()`` (snake_case).
+        The old ``getMibBuilder()`` does not exist in 7.x and would raise
+        ``AttributeError``, silently swallowed by a bare ``except Exception``.
         """
+        try:
+            mb = self._engine.get_mib_builder()
+            # Core modules whose symbols receive_message() looks up.
+            mb.load_modules(
+                "SNMPv2-MIB",    # snmpInPkts, snmpInBadVersions, etc.
+                "SNMPv2-SMI",    # base types
+                "SNMPv2-TC",     # TextualConvention
+                "SNMP-MPD-MIB",  # snmpUnknownPDUHandlers
+            )
+            # Instance files (double-underscore prefix) may be loaded as side-
+            # effects of the above; load explicitly to guarantee coverage.
+            for inst_mod in ("__SNMPv2-MIB", "__SNMP-MPD-MIB"):
+                try:
+                    mb.load_modules(inst_mod)
+                except Exception:  # noqa: BLE001
+                    pass  # not present in all pysnmp builds — safe to skip
+            _LOGGER.debug("pysnmp dispatch MIBs pre-loaded — event-loop I/O eliminated")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("MIB pre-load failed (SNMP will still work): %s", err)
+
+    async def _transport(self) -> UdpTransportTarget:
+        """Return a cached transport target, creating it on first call."""
         if self._transport_cache is None:
-            transport = await UdpTransportTarget.create((self._host, self._port))
-            transport.timeout = 5
-            transport.retries = 2
-            self._transport_cache = transport
+            self._transport_cache = await UdpTransportTarget.create(
+                (self._host, self._port), timeout=5, retries=2
+            )
         return self._transport_cache
 
     def close(self) -> None:
-        """Release the SNMP engine dispatcher (call on integration unload)."""
+        """Release resources (call on integration unload)."""
         self._transport_cache = None
-        # closeDispatcher() was removed in pysnmp 7.x — guard for compatibility
-        if hasattr(self._engine, "closeDispatcher"):
-            self._engine.closeDispatcher()
-        else:
-            _LOGGER.debug("closeDispatcher not available (pysnmp 7.x) — skipping")
+
+    # ------------------------------------------------------------------
+    # Single-OID helpers (used for config-flow validation and startup)
+    # ------------------------------------------------------------------
 
     async def get_outlet_state(self, outlet: int) -> bool:
         """Return True if the outlet is on, False if off."""
-        oid = f"{OID_OUTLET_STATUS}.{outlet}"
+        oid = f"{OID_OUTLET_CONTROL}.{outlet}"
         _LOGGER.debug("GET %s (outlet %s)", oid, outlet)
         async with self._lock:
             errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
-                self._engine,
-                self._auth,
-                await self._transport(),
-                self._context,
+                self._engine, self._auth, await self._transport(), self._context,
                 ObjectType(ObjectIdentity(oid)),
             )
         if errorIndication:
-            _LOGGER.error("GET outlet %s — errorIndication: %s", outlet, errorIndication)
             raise RuntimeError(f"SNMP error: {errorIndication}")
         if errorStatus:
-            _LOGGER.error(
-                "GET outlet %s — errorStatus: %s at index %s",
-                outlet, errorStatus.prettyPrint(), errorIndex,
-            )
             raise RuntimeError(
                 f"SNMP error: {errorStatus.prettyPrint()} at index {errorIndex}"
             )
         if not varBinds:
-            raise RuntimeError(f"GET outlet {outlet} — empty varBinds (no data returned)")
-        for varBind in varBinds:
-            oid_obj, val = varBind
-            _LOGGER.debug(
-                "GET outlet %s — OID: %s  value: %s  type: %s",
-                outlet, oid_obj.prettyPrint(), val.prettyPrint(), type(val).__name__,
+            raise RuntimeError(f"GET outlet {outlet} — empty response")
+        _, val = varBinds[0]
+        _LOGGER.debug("GET outlet %s — value: %s  type: %s", outlet, val.prettyPrint(), type(val).__name__)
+        if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+            raise RuntimeError(
+                f"OID {oid} returned {type(val).__name__} — "
+                "check the OID is correct for this PDU model and that the "
+                "SNMPv3 user has read access"
             )
-            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
-                raise RuntimeError(
-                    f"OID {oid} returned {type(val).__name__} — "
-                    "check the OID is correct for this PDU model and that the "
-                    "SNMPv3 user has read access"
-                )
-            return int(val) == 1  # 1=on, 2=off
-        return False
+        return int(val) == 1  # 1=on, 2=off
 
-    async def get_outlet_name(self, outlet: int) -> str:
-        """Return the outlet name configured on the PDU, or empty string if unavailable."""
-        oid = f"{OID_OUTLET_NAME}.{outlet}"
-        _LOGGER.debug("GET name %s (outlet %s)", oid, outlet)
+    async def _get_integer_oid(self, oid: str) -> int | None:
+        """GET a single integer-valued OID; return None on any error."""
+        _LOGGER.debug("GET %s", oid)
         async with self._lock:
             errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
-                self._engine,
-                self._auth,
-                await self._transport(),
-                self._context,
+                self._engine, self._auth, await self._transport(), self._context,
                 ObjectType(ObjectIdentity(oid)),
             )
         if errorIndication or errorStatus:
-            _LOGGER.debug("Could not read name for outlet %s, using default", outlet)
+            return None
+        for _, val in varBinds:
+            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def _get_string_oid(self, oid: str) -> str:
+        """GET a single string-valued OID; return empty string on any error."""
+        _LOGGER.debug("GET %s", oid)
+        async with self._lock:
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                self._engine, self._auth, await self._transport(), self._context,
+                ObjectType(ObjectIdentity(oid)),
+            )
+        if errorIndication or errorStatus:
             return ""
         for _, val in varBinds:
-            _LOGGER.debug(
-                "Name outlet %s — type: %s  value: %s",
-                outlet, type(val).__name__, val.prettyPrint(),
-            )
             if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
-                _LOGGER.debug("Outlet %s has no name OID on this device", outlet)
                 return ""
-            # Only accept OctetString / DisplayString — if the PDU returns an
-            # Integer here it means the name column is not supported or is
-            # pointing at the wrong OID (e.g. returning the control value).
-            if type(val).__name__ not in ("OctetString", "DisplayString"):
-                _LOGGER.debug(
-                    "Outlet %s name OID returned %s ('%s'), not a string — ignoring",
-                    outlet, type(val).__name__, val.prettyPrint(),
-                )
-                return ""
-            # asOctets() is the pyasn1-native way to get raw bytes from OctetString
-            raw: bytes = val.asOctets() if hasattr(val, "asOctets") else bytes(val)
-            return raw.rstrip(b"\x00").decode("ascii", errors="replace").strip()
+            return _decode_octet_string(val)
         return ""
 
-    async def get_outlet_names(self, count: int) -> dict[int, str]:
-        """Return a dict of outlet_number -> name for all outlets."""
-        return {
-            outlet: await self.get_outlet_name(outlet)
-            for outlet in range(1, count + 1)
-        }
+    async def get_pdu_name(self) -> str:
+        """Return the PDU's configured name (rPDUIdentName), or empty string."""
+        return await self._get_string_oid(OID_IDENT_NAME)
+
+    async def get_num_outlets(self) -> int | None:
+        """Return the outlet count reported by the PDU, or None if unavailable."""
+        val = await self._get_integer_oid(OID_IDENT_NUM_OUTLETS)
+        return val if val and val > 0 else None
+
+    # ------------------------------------------------------------------
+    # Bulk GET methods — fetch multiple OIDs in a single SNMP request
+    # ------------------------------------------------------------------
 
     async def get_all_outlet_states(self, count: int) -> dict[int, bool]:
-        """Return a dict of outlet_number -> is_on for all outlets."""
-        return {
-            outlet: await self.get_outlet_state(outlet)
-            for outlet in range(1, count + 1)
-        }
+        """Return outlet states for all outlets in a single SNMP GET request."""
+        outlets = list(range(1, count + 1))
+        _LOGGER.debug("GET outlet states (bulk, count=%s)", count)
+        async with self._lock:
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                self._engine, self._auth, await self._transport(), self._context,
+                *(ObjectType(ObjectIdentity(f"{OID_OUTLET_CONTROL}.{o}")) for o in outlets),
+            )
+        if errorIndication:
+            raise RuntimeError(f"SNMP error: {errorIndication}")
+        if errorStatus:
+            raise RuntimeError(
+                f"SNMP error: {errorStatus.prettyPrint()} at index {errorIndex}"
+            )
+        result: dict[int, bool] = {}
+        for outlet, (_, val) in zip(outlets, varBinds):
+            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                raise RuntimeError(
+                    f"OID {OID_OUTLET_CONTROL}.{outlet} returned {type(val).__name__} — "
+                    "check the OID is correct for this PDU model and that the "
+                    "SNMPv3 user has read access"
+                )
+            result[outlet] = int(val) == 1
+        return result
+
+    async def get_outlet_names(self, count: int) -> dict[int, str]:
+        """Return outlet names for all outlets in a single SNMP GET request."""
+        outlets = list(range(1, count + 1))
+        _LOGGER.debug("GET outlet names (bulk, count=%s)", count)
+        async with self._lock:
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                self._engine, self._auth, await self._transport(), self._context,
+                *(ObjectType(ObjectIdentity(f"{OID_OUTLET_NAME}.{o}")) for o in outlets),
+            )
+        if errorIndication or errorStatus:
+            _LOGGER.debug("Could not read outlet names — falling back to defaults")
+            return {}
+        result: dict[int, str] = {}
+        for outlet, (_, val) in zip(outlets, varBinds):
+            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                result[outlet] = ""
+                continue
+            # Only accept string types — an Integer here means the name OID
+            # is not supported on this model.
+            if type(val).__name__ not in ("OctetString", "DisplayString"):
+                result[outlet] = ""
+                continue
+            result[outlet] = _decode_octet_string(val)
+        return result
+
+    async def get_device_ident(self) -> dict[str, str]:
+        """Return PDU identity fields in a single SNMP GET request.
+
+        Keys: name, model, serial, firmware, manufacture_date, num_outlets.
+        Any value that cannot be read is returned as an empty string.
+        """
+        _LOGGER.debug("GET device identity (bulk)")
+        async with self._lock:
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                self._engine, self._auth, await self._transport(), self._context,
+                *(ObjectType(ObjectIdentity(oid)) for oid, _, _ in _IDENT_FIELDS),
+            )
+        result = {key: "" for _, key, _ in _IDENT_FIELDS}
+        if errorIndication or errorStatus:
+            return result
+        for (_, key, is_int), (_, val) in zip(_IDENT_FIELDS, varBinds):
+            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                continue
+            if is_int:
+                try:
+                    n = int(val)
+                    result[key] = str(n) if n > 0 else ""
+                except (TypeError, ValueError):
+                    pass
+            else:
+                try:
+                    result[key] = _decode_octet_string(val)
+                except Exception:  # noqa: BLE001
+                    pass
+        return result
+
+    async def get_load_metrics(self) -> tuple[float | None, int | None]:
+        """Return (amps, load_state) from a single SNMP GET request.
+
+        amps: total PDU current in Amps (PDU reports tenths; divided by 10), or None.
+        load_state: integer 1–4 (Low Load / Normal / Near Overload / Overload), or None.
+        Both are None when the OID is unsupported or an SNMP error occurs.
+        """
+        _LOGGER.debug("GET load metrics (bulk)")
+        async with self._lock:
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                self._engine, self._auth, await self._transport(), self._context,
+                ObjectType(ObjectIdentity(OID_LOAD_AMPS)),
+                ObjectType(ObjectIdentity(OID_LOAD_STATE)),
+            )
+        if errorIndication or errorStatus:
+            return None, None
+        amps: float | None = None
+        state: int | None = None
+        if len(varBinds) >= 1:
+            _, amp_val = varBinds[0]
+            if not isinstance(amp_val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                try:
+                    raw = int(amp_val)
+                    if raw >= 0:
+                        amps = round(raw / 10, 1)
+                except (TypeError, ValueError):
+                    pass
+        if len(varBinds) >= 2:
+            _, state_val = varBinds[1]
+            if not isinstance(state_val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                try:
+                    state = int(state_val)
+                except (TypeError, ValueError):
+                    pass
+        return amps, state
+
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
 
     async def set_outlet(self, outlet: int, state: bool) -> None:
         """Send immediateOn or immediateOff to the specified outlet."""
@@ -244,118 +381,13 @@ class APCPDUClient:
         _LOGGER.debug("SET %s = %s (outlet %s -> %s)", oid, value, outlet, "on" if state else "off")
         async with self._lock:
             errorIndication, errorStatus, errorIndex, varBinds = await set_cmd(
-                self._engine,
-                self._auth,
-                await self._transport(),
-                self._context,
+                self._engine, self._auth, await self._transport(), self._context,
                 ObjectType(ObjectIdentity(oid), value),
             )
         if errorIndication:
-            _LOGGER.error("SET outlet %s — errorIndication: %s", outlet, errorIndication)
             raise RuntimeError(f"SNMP error: {errorIndication}")
         if errorStatus:
-            _LOGGER.error(
-                "SET outlet %s — errorStatus: %s at index %s",
-                outlet, errorStatus.prettyPrint(), errorIndex,
-            )
             raise RuntimeError(
                 f"SNMP error: {errorStatus.prettyPrint()} at index {errorIndex}"
             )
         _LOGGER.debug("SET outlet %s -> %s OK", outlet, "on" if state else "off")
-
-    async def _get_integer_oid(self, oid: str) -> int | None:
-        """GET a single integer-valued OID; return None on any error or unexpected type."""
-        _LOGGER.debug("GET %s", oid)
-        async with self._lock:
-            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
-                self._engine,
-                self._auth,
-                await self._transport(),
-                self._context,
-                ObjectType(ObjectIdentity(oid)),
-            )
-        if errorIndication:
-            _LOGGER.debug("GET %s — errorIndication: %s", oid, errorIndication)
-            return None
-        if errorStatus:
-            _LOGGER.debug("GET %s — errorStatus: %s at index %s", oid, errorStatus.prettyPrint(), errorIndex)
-            return None
-        for _, val in varBinds:
-            _LOGGER.debug("GET %s — type: %s  value: %s", oid, type(val).__name__, val.prettyPrint())
-            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
-                _LOGGER.debug("GET %s — OID not available on this device", oid)
-                return None
-            try:
-                return int(val)
-            except (TypeError, ValueError):
-                _LOGGER.debug("GET %s — could not cast %r to int", oid, val)
-                return None
-        return None
-
-    async def get_load_amps(self) -> float | None:
-        """Return the total PDU current draw in Amps, or None if unavailable.
-
-        The PDU reports the value in tenths of Amps (e.g. 15 = 1.5 A).
-        """
-        raw = await self._get_integer_oid(OID_LOAD_AMPS)
-        if raw is None or raw < 0:
-            return None
-        return round(raw / 10, 1)
-
-    async def get_load_state(self) -> int | None:
-        """Return the PDU load state integer (1=lowLoad … 4=overload), or None if unavailable."""
-        return await self._get_integer_oid(OID_LOAD_STATE)
-
-    async def _get_string_oid(self, oid: str) -> str:
-        """GET a single string-valued OID; return empty string on any error."""
-        _LOGGER.debug("GET %s", oid)
-        async with self._lock:
-            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
-                self._engine,
-                self._auth,
-                await self._transport(),
-                self._context,
-                ObjectType(ObjectIdentity(oid)),
-            )
-        if errorIndication or errorStatus:
-            _LOGGER.debug("GET %s — error, skipping", oid)
-            return ""
-        for _, val in varBinds:
-            _LOGGER.debug("GET %s — type: %s  value: %s", oid, type(val).__name__, val.prettyPrint())
-            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
-                return ""
-            raw: bytes = val.asOctets() if hasattr(val, "asOctets") else bytes(val)
-            return raw.rstrip(b"\x00").decode("ascii", errors="replace").strip()
-        return ""
-
-    async def get_pdu_name(self) -> str:
-        """Return the PDU's configured name (rPDUIdentName), or empty string if unavailable."""
-        return await self._get_string_oid(OID_IDENT_NAME)
-
-    async def get_num_outlets(self) -> int | None:
-        """Return the number of outlets reported by the PDU, or None if unavailable."""
-        val = await self._get_integer_oid(OID_IDENT_NUM_OUTLETS)
-        return val if val and val > 0 else None
-
-    async def get_device_ident(self) -> dict[str, str]:
-        """Return a dict of PDU identity strings fetched from the rPDUIdent OIDs.
-
-        Keys: name, model, serial, firmware, manufacture_date.
-        Any value that cannot be read is returned as an empty string.
-        """
-        name, model, serial, firmware, manufacture_date = (
-            await self._get_string_oid(OID_IDENT_NAME),
-            await self._get_string_oid(OID_IDENT_MODEL),
-            await self._get_string_oid(OID_IDENT_SERIAL),
-            await self._get_string_oid(OID_IDENT_FIRMWARE),
-            await self._get_string_oid(OID_IDENT_DATE_OF_MANUFACTURE),
-        )
-        num_outlets = await self._get_integer_oid(OID_IDENT_NUM_OUTLETS)
-        return {
-            "name": name,
-            "model": model,
-            "serial": serial,
-            "firmware": firmware,
-            "manufacture_date": manufacture_date,
-            "num_outlets": str(num_outlets) if num_outlets and num_outlets > 0 else "",
-        }

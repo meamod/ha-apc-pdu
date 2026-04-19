@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -21,7 +20,7 @@ async def async_setup_entry(
     """Create one switch entity per outlet for this PDU."""
     coordinator: APCPDUCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
-        APCPDUOutletSwitch(coordinator, entry, outlet)
+        APCPDUOutletSwitch(coordinator, outlet)
         for outlet in range(1, coordinator.outlet_count + 1)
     )
 
@@ -32,16 +31,10 @@ class APCPDUOutletSwitch(CoordinatorEntity[APCPDUCoordinator], SwitchEntity):
     _attr_has_entity_name = True
     _attr_icon = "mdi:power-socket"
 
-    def __init__(
-        self,
-        coordinator: APCPDUCoordinator,
-        entry: ConfigEntry,
-        outlet: int,
-    ) -> None:
+    def __init__(self, coordinator: APCPDUCoordinator, outlet: int) -> None:
         super().__init__(coordinator)
         self._outlet = outlet
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_outlet_{outlet}"
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_outlet_{outlet}"
         # Use the name from the PDU if set; fall back to "Outlet N"
         pdu_name = coordinator.outlet_names.get(outlet, "").strip()
         self._attr_name = pdu_name if pdu_name else f"Outlet {outlet}"
@@ -85,12 +78,4 @@ class APCPDUOutletSwitch(CoordinatorEntity[APCPDUCoordinator], SwitchEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Group all outlets under one device entry per PDU."""
-        ident = self.coordinator.device_ident
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._entry.entry_id)},
-            name=self._entry.data[CONF_NAME],
-            manufacturer="APC by Schneider Electric",
-            model=ident.get("model") or "AP7920",
-            serial_number=ident.get("serial") or None,
-            sw_version=ident.get("firmware") or None,
-        )
+        return self.coordinator.device_info

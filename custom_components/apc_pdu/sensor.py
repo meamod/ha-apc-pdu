@@ -7,7 +7,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, EntityCategory, UnitOfElectricCurrent
+from homeassistant.const import EntityCategory, UnitOfElectricCurrent
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -25,11 +25,11 @@ async def async_setup_entry(
     """Create load and identity sensors for this PDU."""
     coordinator: APCPDUCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([
-        APCPDUCurrentSensor(coordinator, entry),
-        APCPDULoadStateSensor(coordinator, entry),
-        APCPDUIdentSensor(coordinator, entry, "PDU Name", "name", "mdi:tag-text"),
-        APCPDUIdentSensor(coordinator, entry, "Manufacture Date", "manufacture_date", "mdi:calendar"),
-        APCPDUIdentSensor(coordinator, entry, "Number of Outlets", "num_outlets", "mdi:counter"),
+        APCPDUCurrentSensor(coordinator),
+        APCPDULoadStateSensor(coordinator),
+        APCPDUIdentSensor(coordinator, "PDU Name", "name", "mdi:tag-text"),
+        APCPDUIdentSensor(coordinator, "Manufacture Date", "manufacture_date", "mdi:calendar"),
+        APCPDUIdentSensor(coordinator, "Number of Outlets", "num_outlets", "mdi:counter"),
     ])
 
 
@@ -38,22 +38,13 @@ class _APCPDUBaseSensor(CoordinatorEntity[APCPDUCoordinator], SensorEntity):
 
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: APCPDUCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: APCPDUCoordinator) -> None:
         super().__init__(coordinator)
-        self._entry = entry
 
     @property
     def device_info(self) -> DeviceInfo:
         """Attach to the same device as the outlet switches."""
-        ident = self.coordinator.device_ident
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._entry.entry_id)},
-            name=self._entry.data[CONF_NAME],
-            manufacturer="APC by Schneider Electric",
-            model=ident.get("model") or "AP7920",
-            serial_number=ident.get("serial") or None,
-            sw_version=ident.get("firmware") or None,
-        )
+        return self.coordinator.device_info
 
 
 class APCPDUCurrentSensor(_APCPDUBaseSensor):
@@ -65,9 +56,9 @@ class APCPDUCurrentSensor(_APCPDUBaseSensor):
     _attr_suggested_display_precision = 1
     _attr_icon = "mdi:current-ac"
 
-    def __init__(self, coordinator: APCPDUCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_load_amps"
+    def __init__(self, coordinator: APCPDUCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_load_amps"
         self._attr_name = "Current"
 
     @property
@@ -88,9 +79,9 @@ class APCPDULoadStateSensor(_APCPDUBaseSensor):
     _attr_icon = "mdi:gauge"
     _attr_options = list(LOAD_STATE_MAP.values())
 
-    def __init__(self, coordinator: APCPDUCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_load_state"
+    def __init__(self, coordinator: APCPDUCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_load_state"
         self._attr_name = "Load Status"
 
     @property
@@ -112,14 +103,13 @@ class APCPDUIdentSensor(_APCPDUBaseSensor):
     def __init__(
         self,
         coordinator: APCPDUCoordinator,
-        entry: ConfigEntry,
         name: str,
         ident_key: str,
         icon: str,
     ) -> None:
-        super().__init__(coordinator, entry)
+        super().__init__(coordinator)
         self._ident_key = ident_key
-        self._attr_unique_id = f"{entry.entry_id}_ident_{ident_key}"
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_ident_{ident_key}"
         self._attr_name = name
         self._attr_icon = icon
 

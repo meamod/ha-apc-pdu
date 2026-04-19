@@ -1,6 +1,7 @@
 """APC PDU integration — SNMPv3 outlet control."""
 from __future__ import annotations
 
+import functools
 import logging
 
 from homeassistant.config_entries import ConfigEntry
@@ -34,22 +35,29 @@ def _get_option(entry: ConfigEntry, key: str, default):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up an APC PDU from a config entry."""
-    client = APCPDUClient(
-        host=entry.data[CONF_HOST],
-        port=entry.data[CONF_PORT],
-        username=entry.data[CONF_SNMP_USERNAME],
-        auth_protocol=entry.data[CONF_AUTH_PROTOCOL],
-        auth_key=entry.data.get(CONF_AUTH_KEY, ""),
-        priv_protocol=entry.data[CONF_PRIV_PROTOCOL],
-        priv_key=entry.data.get(CONF_PRIV_KEY, ""),
+    # SnmpEngine() does some file I/O in its constructor (dispatcher setup).
+    # Creating the client in an executor job keeps that off the event loop.
+    # MIB instrumentation is disabled inside APCPDUClient.__init__ so no
+    # further blocking I/O occurs once the client is created.
+    client = await hass.async_add_executor_job(
+        functools.partial(
+            APCPDUClient,
+            host=entry.data[CONF_HOST],
+            port=entry.data[CONF_PORT],
+            username=entry.data[CONF_SNMP_USERNAME],
+            auth_protocol=entry.data[CONF_AUTH_PROTOCOL],
+            auth_key=entry.data.get(CONF_AUTH_KEY, ""),
+            priv_protocol=entry.data[CONF_PRIV_PROTOCOL],
+            priv_key=entry.data.get(CONF_PRIV_KEY, ""),
+        )
     )
 
     scan_interval = _get_option(entry, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
 
     # Determine outlet count: manual options override (> 0) takes priority,
     # otherwise auto-detect from the PDU, falling back to the default.
-    # Guard against None — HA stores None when the user unticks the optional
-    # field checkbox, which would cause a TypeError on the comparison below.
+    # Coerce to int defensively — old config entries stored before the options
+    # flow was added could hold None or a string value.
     manual_count = int(_get_option(entry, CONF_OUTLET_COUNT, 0) or 0)
     if manual_count > 0:
         outlet_count = manual_count
@@ -73,7 +81,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry.data[CONF_HOST], DEFAULT_OUTLET_COUNT,
             )
 
-    coordinator = APCPDUCoordinator(hass, client, outlet_count, scan_interval)
+    coordinator = APCPDUCoordinator(hass, client, entry, outlet_count, scan_interval)
 
     # Fetch outlet names once at setup — not re-polled on every state update.
     # Gracefully fall back to "Outlet N" labels if the PDU doesn't support the

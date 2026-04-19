@@ -1,5 +1,8 @@
 # APC PDU — Home Assistant Integration
 
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![GitHub release](https://img.shields.io/github/release/meamod/ha-apc-pdu.svg)](https://github.com/meamod/ha-apc-pdu/releases)
+
 Control APC Switched Rack PDU outlets from Home Assistant over SNMPv3, with live current monitoring and full device identity reporting.
 
 Tested on: **AP7920** (8-outlet Switched Rack PDU)  
@@ -44,6 +47,19 @@ Before adding the integration, create an SNMPv3 user on the PDU via its web inte
 ---
 
 ## Installation
+
+### HACS (recommended)
+
+1. In Home Assistant, open **HACS → Integrations**.
+2. Click the three-dot menu in the top-right corner and choose **Custom repositories**.
+3. Enter `https://github.com/meamod/ha-apc-pdu` as the repository URL and select **Integration** as the category, then click **Add**.
+4. Search for **APC PDU** and click **Download**.
+5. Restart Home Assistant fully (required on first install so HA installs `pysnmp`).
+6. Go to **Settings → Devices & Services → Add Integration** and search for **APC PDU**.
+
+> Once the repository is listed in the default HACS store you will be able to find it directly without adding a custom repository.
+
+### Manual
 
 1. Copy the `custom_components/apc_pdu/` folder into your HA configuration directory:
    ```

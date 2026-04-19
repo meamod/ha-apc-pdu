@@ -20,7 +20,7 @@ MIN_SCAN_INTERVAL = 5
 # Writing sends a command:       1=immediateOn, 2=immediateOff, 3=immediateReboot
 # There is no separate status table on this model (.4.2 is sPDUMasterControl, not outlets).
 OID_OUTLET_NAME    = "1.3.6.1.4.1.318.1.1.4.4.2.1.4"  # sPDUOutletControlName (OctetString) — AP7920 uses column 4, not 2
-OID_OUTLET_STATUS  = "1.3.6.1.4.1.318.1.1.4.4.2.1.3"
+# sPDUOutletControlOutletCommand — same OID for both reading state and sending commands
 OID_OUTLET_CONTROL = "1.3.6.1.4.1.318.1.1.4.4.2.1.3"
 CMD_IMMEDIATE_ON = 1
 CMD_IMMEDIATE_OFF = 2

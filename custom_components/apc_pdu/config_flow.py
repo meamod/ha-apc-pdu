@@ -85,10 +85,13 @@ async def _validate_connection(data: dict) -> str:
         priv_protocol=data[CONF_PRIV_PROTOCOL],
         priv_key=data.get(CONF_PRIV_KEY, ""),
     )
-    state = await client.get_outlet_state(1)
-    _LOGGER.debug("Connection validated — outlet 1 state: %s", "on" if state else "off")
-    pdu_name = await client.get_pdu_name()
-    _LOGGER.debug("PDU name from device: %r", pdu_name)
+    try:
+        state = await client.get_outlet_state(1)
+        _LOGGER.debug("Connection validated — outlet 1 state: %s", "on" if state else "off")
+        pdu_name = await client.get_pdu_name()
+        _LOGGER.debug("PDU name from device: %r", pdu_name)
+    finally:
+        client.close()
     return pdu_name
 
 

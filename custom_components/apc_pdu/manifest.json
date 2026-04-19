@@ -1,12 +1,13 @@
 {
   "domain": "apc_pdu",
   "name": "APC PDU",
-  "version": "1.0.0",
-  "requirements": ["pysnmp>=6.1"],
+  "version": "1.1.3",
+  "requirements": ["pysnmp>=7.0"],
   "dependencies": [],
-  "codeowners": ["@jamesweston"],
+  "codeowners": ["@meamod"],
+  "loggers": ["custom_components.apc_pdu"],
   "iot_class": "local_polling",
   "config_flow": true,
-  "documentation": "https://github.com/jamesweston/ha-apc-pdu",
-  "issue_tracker": "https://github.com/jamesweston/ha-apc-pdu/issues"
+  "documentation": "https://github.com/meamod/ha-apc-pdu",
+  "issue_tracker": "https://github.com/meamod/ha-apc-pdu/issues"
 }
