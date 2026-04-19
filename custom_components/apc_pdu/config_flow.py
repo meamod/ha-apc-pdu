@@ -136,6 +136,10 @@ class APCPDUOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict | None = None):
         if user_input is not None:
+            # HA sends None for an optional integer field when the user unticks
+            # the checkbox.  Normalise to 0 so setup treats it as "auto-detect".
+            if user_input.get(CONF_OUTLET_COUNT) is None:
+                user_input = {**user_input, CONF_OUTLET_COUNT: 0}
             return self.async_create_entry(data=user_input)
 
         # Prefer options (previously saved) then fall back to original setup data.

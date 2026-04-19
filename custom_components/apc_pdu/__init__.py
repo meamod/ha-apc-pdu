@@ -48,7 +48,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Determine outlet count: manual options override (> 0) takes priority,
     # otherwise auto-detect from the PDU, falling back to the default.
-    manual_count = _get_option(entry, CONF_OUTLET_COUNT, 0)
+    # Guard against None — HA stores None when the user unticks the optional
+    # field checkbox, which would cause a TypeError on the comparison below.
+    manual_count = int(_get_option(entry, CONF_OUTLET_COUNT, 0) or 0)
     if manual_count > 0:
         outlet_count = manual_count
         _LOGGER.debug("Using manual outlet count override: %s", outlet_count)

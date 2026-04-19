@@ -58,7 +58,9 @@ Before adding the integration, create an SNMPv3 user on the PDU via its web inte
            ├── sensor.py
            ├── snmp.py
            ├── strings.json
-           └── switch.py
+           ├── switch.py
+           └── translations/
+               └── en.json
    ```
 
 2. Restart Home Assistant fully (required on first install so HA installs `pysnmp`).
