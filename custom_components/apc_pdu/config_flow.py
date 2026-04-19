@@ -136,28 +136,26 @@ class APCPDUOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict | None = None):
         if user_input is not None:
-            # HA sends None for an optional integer field when the user unticks
-            # the checkbox.  Normalise to 0 so setup treats it as "auto-detect".
-            if user_input.get(CONF_OUTLET_COUNT) is None:
-                user_input = {**user_input, CONF_OUTLET_COUNT: 0}
             return self.async_create_entry(data=user_input)
 
         # Prefer options (previously saved) then fall back to original setup data.
         entry = self.config_entry
-        current_outlet_count = entry.options.get(CONF_OUTLET_COUNT, 0)
-        current_scan_interval = entry.options.get(
-            CONF_SCAN_INTERVAL,
-            entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        current_outlet_count = int(entry.options.get(CONF_OUTLET_COUNT, 0) or 0)
+        current_scan_interval = int(
+            entry.options.get(
+                CONF_SCAN_INTERVAL,
+                entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            )
         )
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(CONF_OUTLET_COUNT, default=current_outlet_count): vol.All(
+                    vol.Required(CONF_OUTLET_COUNT, default=current_outlet_count): vol.All(
                         int, vol.Range(min=0, max=24)
                     ),
-                    vol.Optional(CONF_SCAN_INTERVAL, default=current_scan_interval): vol.All(
+                    vol.Required(CONF_SCAN_INTERVAL, default=current_scan_interval): vol.All(
                         int, vol.Range(min=MIN_SCAN_INTERVAL, max=300)
                     ),
                 }

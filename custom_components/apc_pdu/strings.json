@@ -41,7 +41,7 @@
           "scan_interval": "Poll Interval (seconds)"
         },
         "data_description": {
-          "outlet_count": "Leave unticked (or set to 0) to auto-detect the outlet count from the PDU. Set a value only if auto-detection returns the wrong number of outlets.",
+          "outlet_count": "Set to 0 to auto-detect the outlet count from the PDU. Set a specific number only if auto-detection returns the wrong value.",
           "scan_interval": "How often Home Assistant polls the PDU to check outlet states. Lower values give faster detection of changes made outside HA, at the cost of slightly more network traffic. Minimum 5 seconds, maximum 300 seconds."
         }
       }
