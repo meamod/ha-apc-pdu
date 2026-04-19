@@ -58,7 +58,7 @@ class APCPDUOutletSwitch(CoordinatorEntity[APCPDUCoordinator], SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return True if outlet is on."""
-        return bool(self.coordinator.data.get(self._outlet, False))
+        return bool((self.coordinator.data or {}).get(self._outlet, False))
 
     async def async_turn_on(self, **kwargs) -> None:
         """Send immediateOn and update HA state optimistically.
