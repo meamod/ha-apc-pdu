@@ -1,0 +1,82 @@
+"""Switch platform — one entity per PDU outlet."""
+from __future__ import annotations
+
+from homeassistant.components.switch import SwitchEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_NAME
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import DOMAIN
+from .coordinator import APCPDUCoordinator
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Create one switch entity per outlet for this PDU."""
+    coordinator: APCPDUCoordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities(
+        APCPDUOutletSwitch(coordinator, entry, outlet)
+        for outlet in range(1, coordinator.outlet_count + 1)
+    )
+
+
+class APCPDUOutletSwitch(CoordinatorEntity[APCPDUCoordinator], SwitchEntity):
+    """Represents a single switchable outlet on an APC PDU."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: APCPDUCoordinator,
+        entry: ConfigEntry,
+        outlet: int,
+    ) -> None:
+        super().__init__(coordinator)
+        self._outlet = outlet
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_outlet_{outlet}"
+        # Use the name from the PDU if set; fall back to "Outlet N"
+        pdu_name = coordinator.outlet_names.get(outlet, "").strip()
+        self._attr_name = pdu_name if pdu_name else f"Outlet {outlet}"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if outlet is on."""
+        return bool(self.coordinator.data.get(self._outlet, False))
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Send immediateOn and update HA state optimistically.
+
+        No immediate re-poll after the SET — the PDU needs a moment to apply
+        the change, and firing async_request_refresh() straight away causes the
+        mobile app to read the old state over WebSocket and snap back to Off.
+        The regular coordinator poll will confirm the real state within the
+        configured poll interval.
+        """
+        await self.coordinator.client.set_outlet(self._outlet, True)
+        self.coordinator.data[self._outlet] = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Send immediateOff and update HA state optimistically.
+
+        Same reasoning as async_turn_on — no immediate re-poll.
+        """
+        await self.coordinator.client.set_outlet(self._outlet, False)
+        self.coordinator.data[self._outlet] = False
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> dict:
+        """Group all outlets under one device entry per PDU."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+            "name": self._entry.data[CONF_NAME],
+            "manufacturer": "APC by Schneider Electric",
+            "model": "AP7920",
+        }

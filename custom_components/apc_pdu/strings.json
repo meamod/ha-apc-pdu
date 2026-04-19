@@ -1,0 +1,49 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "APC PDU Setup",
+        "description": "Configure SNMPv3 access to your APC PDU.",
+        "data": {
+          "name": "PDU Name",
+          "host": "IP Address / Hostname",
+          "port": "SNMP Port",
+          "snmp_username": "SNMPv3 Username",
+          "auth_protocol": "Authentication Protocol",
+          "auth_key": "Authentication Password",
+          "priv_protocol": "Privacy Protocol",
+          "priv_key": "Privacy Password",
+          "outlet_count": "Number of Outlets",
+          "scan_interval": "Poll Interval (seconds)"
+        },
+        "data_description": {
+          "auth_key": "Required when Authentication Protocol is not 'none'.",
+          "priv_key": "Required when Privacy Protocol is not 'none'."
+        }
+      }
+    },
+    "options": {
+      "step": {
+        "init": {
+          "title": "APC PDU Options",
+          "data": {
+            "outlet_count": "Number of Outlets",
+            "scan_interval": "Poll Interval (seconds)"
+          },
+          "data_description": {
+            "scan_interval": "How often to poll the PDU for outlet state changes (5–300 seconds).",
+            "outlet_count": "Increase this if you add a new PDU with more outlets."
+          }
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to reach the PDU. Check the IP address, port, and SNMPv3 credentials.",
+      "auth_key_required": "An Authentication Password is required when the Authentication Protocol is not 'none'.",
+      "priv_key_required": "A Privacy Password is required when the Privacy Protocol is not 'none'."
+    },
+    "abort": {
+      "already_configured": "This PDU is already configured."
+    }
+  }
+}

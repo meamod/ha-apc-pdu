@@ -1,0 +1,12 @@
+{
+  "domain": "apc_pdu",
+  "name": "APC PDU",
+  "version": "1.0.0",
+  "requirements": ["pysnmp>=6.1"],
+  "dependencies": [],
+  "codeowners": ["@jamesweston"],
+  "iot_class": "local_polling",
+  "config_flow": true,
+  "documentation": "https://github.com/jamesweston/ha-apc-pdu",
+  "issue_tracker": "https://github.com/jamesweston/ha-apc-pdu/issues"
+}
