@@ -53,7 +53,21 @@ except ImportError:
     usmAesCfb192Protocol = usmAesCfb128Protocol  # type: ignore[assignment]
     usmAesCfb256Protocol = usmAesCfb128Protocol  # type: ignore[assignment]
 
-from .const import OID_OUTLET_NAME, OID_OUTLET_STATUS, OID_OUTLET_CONTROL, CMD_IMMEDIATE_ON, CMD_IMMEDIATE_OFF
+from .const import (
+    OID_OUTLET_NAME,
+    OID_OUTLET_STATUS,
+    OID_OUTLET_CONTROL,
+    OID_LOAD_AMPS,
+    OID_LOAD_STATE,
+    OID_IDENT_NAME,
+    OID_IDENT_MODEL,
+    OID_IDENT_SERIAL,
+    OID_IDENT_FIRMWARE,
+    OID_IDENT_DATE_OF_MANUFACTURE,
+    OID_IDENT_NUM_OUTLETS,
+    CMD_IMMEDIATE_ON,
+    CMD_IMMEDIATE_OFF,
+)
 
 AUTH_PROTOCOL_MAP = {
     "none":    usmNoAuthProtocol,
@@ -103,19 +117,32 @@ class APCPDUClient:
         # racing with a SET corrupts the engine's request-id tracking and one or
         # both operations silently receive no response.
         self._lock = asyncio.Lock()
+        # Cached transport — created once on first use and reused thereafter.
+        # Cleared by close() so a new instance is built if the client is ever
+        # reused after teardown.
+        self._transport_cache: UdpTransportTarget | None = None
 
     async def _transport(self) -> UdpTransportTarget:
-        """Create a transport target — pysnmp 7.x requires await UdpTransportTarget.create()."""
-        transport = await UdpTransportTarget.create((self._host, self._port))
-        transport.timeout = 5
-        transport.retries = 2
-        return transport
+        """Return a cached transport target, creating it on first call.
+
+        pysnmp 7.x requires ``await UdpTransportTarget.create()`` — the
+        bare constructor is not sufficient.
+        """
+        if self._transport_cache is None:
+            transport = await UdpTransportTarget.create((self._host, self._port))
+            transport.timeout = 5
+            transport.retries = 2
+            self._transport_cache = transport
+        return self._transport_cache
 
     def close(self) -> None:
         """Release the SNMP engine dispatcher (call on integration unload)."""
+        self._transport_cache = None
         # closeDispatcher() was removed in pysnmp 7.x — guard for compatibility
         if hasattr(self._engine, "closeDispatcher"):
             self._engine.closeDispatcher()
+        else:
+            _LOGGER.debug("closeDispatcher not available (pysnmp 7.x) — skipping")
 
     async def get_outlet_state(self, outlet: int) -> bool:
         """Return True if the outlet is on, False if off."""
@@ -140,6 +167,8 @@ class APCPDUClient:
             raise RuntimeError(
                 f"SNMP error: {errorStatus.prettyPrint()} at index {errorIndex}"
             )
+        if not varBinds:
+            raise RuntimeError(f"GET outlet {outlet} — empty varBinds (no data returned)")
         for varBind in varBinds:
             oid_obj, val = varBind
             _LOGGER.debug(
@@ -208,6 +237,8 @@ class APCPDUClient:
 
     async def set_outlet(self, outlet: int, state: bool) -> None:
         """Send immediateOn or immediateOff to the specified outlet."""
+        if outlet < 1:
+            raise ValueError(f"Outlet number must be >= 1, got {outlet}")
         oid = f"{OID_OUTLET_CONTROL}.{outlet}"
         value = Integer32(CMD_IMMEDIATE_ON if state else CMD_IMMEDIATE_OFF)
         _LOGGER.debug("SET %s = %s (outlet %s -> %s)", oid, value, outlet, "on" if state else "off")
@@ -231,3 +262,100 @@ class APCPDUClient:
                 f"SNMP error: {errorStatus.prettyPrint()} at index {errorIndex}"
             )
         _LOGGER.debug("SET outlet %s -> %s OK", outlet, "on" if state else "off")
+
+    async def _get_integer_oid(self, oid: str) -> int | None:
+        """GET a single integer-valued OID; return None on any error or unexpected type."""
+        _LOGGER.debug("GET %s", oid)
+        async with self._lock:
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                self._engine,
+                self._auth,
+                await self._transport(),
+                self._context,
+                ObjectType(ObjectIdentity(oid)),
+            )
+        if errorIndication:
+            _LOGGER.debug("GET %s — errorIndication: %s", oid, errorIndication)
+            return None
+        if errorStatus:
+            _LOGGER.debug("GET %s — errorStatus: %s at index %s", oid, errorStatus.prettyPrint(), errorIndex)
+            return None
+        for _, val in varBinds:
+            _LOGGER.debug("GET %s — type: %s  value: %s", oid, type(val).__name__, val.prettyPrint())
+            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                _LOGGER.debug("GET %s — OID not available on this device", oid)
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                _LOGGER.debug("GET %s — could not cast %r to int", oid, val)
+                return None
+        return None
+
+    async def get_load_amps(self) -> float | None:
+        """Return the total PDU current draw in Amps, or None if unavailable.
+
+        The PDU reports the value in tenths of Amps (e.g. 15 = 1.5 A).
+        """
+        raw = await self._get_integer_oid(OID_LOAD_AMPS)
+        if raw is None or raw < 0:
+            return None
+        return round(raw / 10, 1)
+
+    async def get_load_state(self) -> int | None:
+        """Return the PDU load state integer (1=lowLoad … 4=overload), or None if unavailable."""
+        return await self._get_integer_oid(OID_LOAD_STATE)
+
+    async def _get_string_oid(self, oid: str) -> str:
+        """GET a single string-valued OID; return empty string on any error."""
+        _LOGGER.debug("GET %s", oid)
+        async with self._lock:
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                self._engine,
+                self._auth,
+                await self._transport(),
+                self._context,
+                ObjectType(ObjectIdentity(oid)),
+            )
+        if errorIndication or errorStatus:
+            _LOGGER.debug("GET %s — error, skipping", oid)
+            return ""
+        for _, val in varBinds:
+            _LOGGER.debug("GET %s — type: %s  value: %s", oid, type(val).__name__, val.prettyPrint())
+            if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+                return ""
+            raw: bytes = val.asOctets() if hasattr(val, "asOctets") else bytes(val)
+            return raw.rstrip(b"\x00").decode("ascii", errors="replace").strip()
+        return ""
+
+    async def get_pdu_name(self) -> str:
+        """Return the PDU's configured name (rPDUIdentName), or empty string if unavailable."""
+        return await self._get_string_oid(OID_IDENT_NAME)
+
+    async def get_num_outlets(self) -> int | None:
+        """Return the number of outlets reported by the PDU, or None if unavailable."""
+        val = await self._get_integer_oid(OID_IDENT_NUM_OUTLETS)
+        return val if val and val > 0 else None
+
+    async def get_device_ident(self) -> dict[str, str]:
+        """Return a dict of PDU identity strings fetched from the rPDUIdent OIDs.
+
+        Keys: name, model, serial, firmware, manufacture_date.
+        Any value that cannot be read is returned as an empty string.
+        """
+        name, model, serial, firmware, manufacture_date = (
+            await self._get_string_oid(OID_IDENT_NAME),
+            await self._get_string_oid(OID_IDENT_MODEL),
+            await self._get_string_oid(OID_IDENT_SERIAL),
+            await self._get_string_oid(OID_IDENT_FIRMWARE),
+            await self._get_string_oid(OID_IDENT_DATE_OF_MANUFACTURE),
+        )
+        num_outlets = await self._get_integer_oid(OID_IDENT_NUM_OUTLETS)
+        return {
+            "name": name,
+            "model": model,
+            "serial": serial,
+            "firmware": firmware,
+            "manufacture_date": manufacture_date,
+            "num_outlets": str(num_outlets) if num_outlets and num_outlets > 0 else "",
+        }

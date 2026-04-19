@@ -13,10 +13,10 @@
           "auth_key": "Authentication Password",
           "priv_protocol": "Privacy Protocol",
           "priv_key": "Privacy Password",
-          "outlet_count": "Number of Outlets",
           "scan_interval": "Poll Interval (seconds)"
         },
         "data_description": {
+          "name": "Leave blank to use the name configured on the PDU itself.",
           "auth_key": "Required when Authentication Protocol is not 'none'.",
           "priv_key": "Required when Privacy Protocol is not 'none'."
         }
@@ -32,7 +32,7 @@
           },
           "data_description": {
             "scan_interval": "How often to poll the PDU for outlet state changes (5–300 seconds).",
-            "outlet_count": "Increase this if you add a new PDU with more outlets."
+            "outlet_count": "Set to 0 to auto-detect from the PDU. Override only if auto-detection returns the wrong value."
           }
         }
       }

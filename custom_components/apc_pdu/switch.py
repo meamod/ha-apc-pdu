@@ -5,6 +5,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -29,6 +30,7 @@ class APCPDUOutletSwitch(CoordinatorEntity[APCPDUCoordinator], SwitchEntity):
     """Represents a single switchable outlet on an APC PDU."""
 
     _attr_has_entity_name = True
+    _attr_icon = "mdi:power-socket"
 
     def __init__(
         self,
@@ -43,6 +45,15 @@ class APCPDUOutletSwitch(CoordinatorEntity[APCPDUCoordinator], SwitchEntity):
         # Use the name from the PDU if set; fall back to "Outlet N"
         pdu_name = coordinator.outlet_names.get(outlet, "").strip()
         self._attr_name = pdu_name if pdu_name else f"Outlet {outlet}"
+
+    @property
+    def available(self) -> bool:
+        """Return False when the coordinator failed its last poll."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data is not None
+            and self._outlet in self.coordinator.data
+        )
 
     @property
     def is_on(self) -> bool:
@@ -72,11 +83,14 @@ class APCPDUOutletSwitch(CoordinatorEntity[APCPDUCoordinator], SwitchEntity):
         self.async_write_ha_state()
 
     @property
-    def device_info(self) -> dict:
+    def device_info(self) -> DeviceInfo:
         """Group all outlets under one device entry per PDU."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": self._entry.data[CONF_NAME],
-            "manufacturer": "APC by Schneider Electric",
-            "model": "AP7920",
-        }
+        ident = self.coordinator.device_ident
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self._entry.data[CONF_NAME],
+            manufacturer="APC by Schneider Electric",
+            model=ident.get("model") or "AP7920",
+            serial_number=ident.get("serial") or None,
+            sw_version=ident.get("firmware") or None,
+        )

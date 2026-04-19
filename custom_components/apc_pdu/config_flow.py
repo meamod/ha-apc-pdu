@@ -35,7 +35,7 @@ _LOGGER = logging.getLogger(__name__)
 
 STEP_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_NAME, default="APC PDU"): str,
+        vol.Optional(CONF_NAME, default=""): str,
         vol.Required(CONF_HOST): str,
         vol.Optional(CONF_PORT, default=DEFAULT_PORT): vol.All(int, vol.Range(min=1, max=65535)),
         vol.Required(CONF_SNMP_USERNAME): str,
@@ -43,9 +43,6 @@ STEP_SCHEMA = vol.Schema(
         vol.Optional(CONF_AUTH_KEY, default=""): str,
         vol.Required(CONF_PRIV_PROTOCOL, default="AES-128"): vol.In(PRIV_PROTOCOLS),
         vol.Optional(CONF_PRIV_KEY, default=""): str,
-        vol.Optional(CONF_OUTLET_COUNT, default=DEFAULT_OUTLET_COUNT): vol.All(
-            int, vol.Range(min=1, max=24)
-        ),
         vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(
             int, vol.Range(min=MIN_SCAN_INTERVAL, max=300)
         ),
@@ -63,8 +60,12 @@ def _validate_credentials(data: dict) -> dict[str, str]:
     return errors
 
 
-async def _validate_connection(data: dict) -> None:
-    """Try to read outlet 1 to verify SNMPv3 credentials and connectivity."""
+async def _validate_connection(data: dict) -> str:
+    """Try to read outlet 1 to verify SNMPv3 credentials and connectivity.
+
+    Returns the PDU's configured name (rPDUIdentName) on success, or an empty
+    string if the name OID is not available.  Raises on connection failure.
+    """
     from .snmp import APCPDUClient  # noqa: PLC0415  (lazy — see module comment)
 
     _LOGGER.debug(
@@ -86,6 +87,9 @@ async def _validate_connection(data: dict) -> None:
     )
     state = await client.get_outlet_state(1)
     _LOGGER.debug("Connection validated — outlet 1 state: %s", "on" if state else "off")
+    pdu_name = await client.get_pdu_name()
+    _LOGGER.debug("PDU name from device: %r", pdu_name)
+    return pdu_name
 
 
 class APCPDUConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -107,14 +111,17 @@ class APCPDUConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = _validate_credentials(user_input)
             if not errors:
                 try:
-                    await _validate_connection(user_input)
+                    pdu_name = await _validate_connection(user_input)
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("Connection validation failed")
                     errors["base"] = "cannot_connect"
                 else:
+                    # Use the name the user typed; fall back to the PDU's own
+                    # configured name; then fall back to a sensible default.
+                    name = user_input.get(CONF_NAME, "").strip() or pdu_name or "APC PDU"
                     return self.async_create_entry(
-                        title=user_input[CONF_NAME],
-                        data=user_input,
+                        title=name,
+                        data={**user_input, CONF_NAME: name},
                     )
 
         return self.async_show_form(
@@ -133,10 +140,7 @@ class APCPDUOptionsFlow(config_entries.OptionsFlow):
 
         # Prefer options (previously saved) then fall back to original setup data.
         entry = self.config_entry
-        current_outlet_count = entry.options.get(
-            CONF_OUTLET_COUNT,
-            entry.data.get(CONF_OUTLET_COUNT, DEFAULT_OUTLET_COUNT),
-        )
+        current_outlet_count = entry.options.get(CONF_OUTLET_COUNT, 0)
         current_scan_interval = entry.options.get(
             CONF_SCAN_INTERVAL,
             entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
@@ -147,7 +151,7 @@ class APCPDUOptionsFlow(config_entries.OptionsFlow):
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_OUTLET_COUNT, default=current_outlet_count): vol.All(
-                        int, vol.Range(min=1, max=24)
+                        int, vol.Range(min=0, max=24)
                     ),
                     vol.Optional(CONF_SCAN_INTERVAL, default=current_scan_interval): vol.All(
                         int, vol.Range(min=MIN_SCAN_INTERVAL, max=300)

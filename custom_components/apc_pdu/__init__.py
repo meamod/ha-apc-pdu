@@ -24,7 +24,7 @@ from .snmp import APCPDUClient
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SWITCH]
+PLATFORMS = [Platform.SWITCH, Platform.SENSOR]
 
 
 def _get_option(entry: ConfigEntry, key: str, default):
@@ -44,8 +44,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         priv_key=entry.data.get(CONF_PRIV_KEY, ""),
     )
 
-    outlet_count = _get_option(entry, CONF_OUTLET_COUNT, DEFAULT_OUTLET_COUNT)
     scan_interval = _get_option(entry, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+
+    # Determine outlet count: manual options override (> 0) takes priority,
+    # otherwise auto-detect from the PDU, falling back to the default.
+    manual_count = _get_option(entry, CONF_OUTLET_COUNT, 0)
+    if manual_count > 0:
+        outlet_count = manual_count
+        _LOGGER.debug("Using manual outlet count override: %s", outlet_count)
+    else:
+        try:
+            detected = await client.get_num_outlets()
+            if detected:
+                outlet_count = detected
+                _LOGGER.debug("Auto-detected %s outlets from PDU", outlet_count)
+            else:
+                outlet_count = DEFAULT_OUTLET_COUNT
+                _LOGGER.warning(
+                    "Could not auto-detect outlet count from %s — using default %s",
+                    entry.data[CONF_HOST], DEFAULT_OUTLET_COUNT,
+                )
+        except Exception:  # noqa: BLE001
+            outlet_count = DEFAULT_OUTLET_COUNT
+            _LOGGER.warning(
+                "Error auto-detecting outlet count from %s — using default %s",
+                entry.data[CONF_HOST], DEFAULT_OUTLET_COUNT,
+            )
 
     coordinator = APCPDUCoordinator(hass, client, outlet_count, scan_interval)
 
@@ -60,6 +84,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data[CONF_HOST],
         )
         coordinator.outlet_names = {}
+
+    # Fetch PDU identity strings once at setup for DeviceInfo population.
+    try:
+        coordinator.device_ident = await client.get_device_ident()
+        _LOGGER.debug("PDU identity: %s", coordinator.device_ident)
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "Could not read identity info from %s — device panel will show defaults",
+            entry.data[CONF_HOST],
+        )
+        coordinator.device_ident = {}
 
     await coordinator.async_config_entry_first_refresh()
 
