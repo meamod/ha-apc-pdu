@@ -208,7 +208,7 @@ class APCPDUClient:
             try:
                 return int(val)
             except (TypeError, ValueError):
-                return None
+                return None  # pysnmp type does not support int() conversion
         return None
 
     async def _get_string_oid(self, oid: str) -> str:
@@ -314,7 +314,7 @@ class APCPDUClient:
                     n = int(val)
                     result[key] = str(n) if n > 0 else ""
                 except (TypeError, ValueError):
-                    pass
+                    pass  # unexpected non-integer type from PDU — leave key as ""
             else:
                 try:
                     result[key] = _decode_octet_string(val)
@@ -348,14 +348,14 @@ class APCPDUClient:
                     if raw >= 0:
                         amps = round(raw / 10, 1)
                 except (TypeError, ValueError):
-                    pass
+                    pass  # unexpected non-integer type — leave amps as None
         if len(varBinds) >= 2:
             _, state_val = varBinds[1]
             if not isinstance(state_val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
                 try:
                     state = int(state_val)
                 except (TypeError, ValueError):
-                    pass
+                    pass  # unexpected non-integer type — leave state as None
         return amps, state
 
     # ------------------------------------------------------------------
