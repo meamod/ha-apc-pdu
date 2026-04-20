@@ -22,6 +22,8 @@ from pysnmp.proto.rfc1902 import Integer32
 # SNMP exception values returned inside varBinds (not as errorIndication/errorStatus)
 from pysnmp.proto.rfc1905 import NoSuchInstance, NoSuchObject, EndOfMibView
 
+from pysnmp.smi import view as _mib_view
+
 # All auth/priv protocol constants are guaranteed present in pysnmp >= 7.0
 from pysnmp.hlapi.v3arch import (
     usmNoAuthProtocol,
@@ -122,40 +124,28 @@ class APCPDUClient:
         self._transport_cache: UdpTransportTarget | None = None
 
     def _preload_dispatch_mibs(self) -> None:
-        """Pre-load the MIBs that pysnmp's message dispatcher uses internally.
+        """Pre-load all pysnmp MIBs to prevent blocking I/O in the event loop.
 
-        pysnmp's ``receive_message`` (rfc3412) calls
-        ``mib_instrum_controller.get_mib_builder().import_symbols(
-            "__SNMPv2-MIB", "snmpInPkts", ...)``
-        on *every* received packet to update SNMP statistics counters.
+        Called from ``__init__``, which is invoked via ``async_add_executor_job``
+        so all file I/O stays off the event loop.
 
-        ``import_symbols`` checks ``self.mibSymbols`` before doing any I/O —
-        if the module is already there it returns immediately.  Loading here
-        (inside ``__init__``, which is called from an executor thread) populates
-        ``mibSymbols`` so that all event-loop callbacks are instant cache hits
-        with no file I/O and no HA blocking-call warnings.
+        Mirrors the fix applied to the built-in HA ``snmp`` integration in
+        https://github.com/home-assistant/core/pull/118521:
+        - Build a ``MibViewController`` around the engine's MIB builder and
+          cache it on the engine (pysnmp looks for it there during OID resolution).
+        - Call ``load_modules()`` with *no arguments*, which is pysnmp's
+          "load everything" form — it discovers and loads every module it ships,
+          including the double-underscore instance modules (``__SNMPv2-MIB`` etc.)
+          that ``receive_message`` looks up on every received packet.
 
-        The correct pysnmp 7.x API is ``get_mib_builder()`` (snake_case).
-        The old ``getMibBuilder()`` does not exist in 7.x and would raise
-        ``AttributeError``, silently swallowed by a bare ``except Exception``.
+        After this call ``import_symbols`` always finds modules in its in-memory
+        cache and never falls through to ``os.listdir`` / ``open``.
         """
         try:
-            mb = self._engine.get_mib_builder()
-            # Core modules whose symbols receive_message() looks up.
-            mb.load_modules(
-                "SNMPv2-MIB",    # snmpInPkts, snmpInBadVersions, etc.
-                "SNMPv2-SMI",    # base types
-                "SNMPv2-TC",     # TextualConvention
-                "SNMP-MPD-MIB",  # snmpUnknownPDUHandlers
-            )
-            # Instance files (double-underscore prefix) may be loaded as side-
-            # effects of the above; load explicitly to guarantee coverage.
-            for inst_mod in ("__SNMPv2-MIB", "__SNMP-MPD-MIB"):
-                try:
-                    mb.load_modules(inst_mod)
-                except Exception:  # noqa: BLE001
-                    pass  # not present in all pysnmp builds — safe to skip
-            _LOGGER.debug("pysnmp dispatch MIBs pre-loaded — event-loop I/O eliminated")
+            mvc = _mib_view.MibViewController(self._engine.get_mib_builder())
+            self._engine.cache["mibViewController"] = mvc
+            mvc.mibBuilder.load_modules()
+            _LOGGER.debug("pysnmp MIBs pre-loaded — event-loop I/O eliminated")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("MIB pre-load failed (SNMP will still work): %s", err)
 
