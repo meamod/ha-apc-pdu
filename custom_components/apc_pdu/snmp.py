@@ -105,8 +105,7 @@ class APCPDUClient:
     ) -> None:
         self._host = host
         self._port = port
-        self._engine = SnmpEngine()
-        self._preload_dispatch_mibs()
+        self._engine = self._make_fresh_engine()
 
         self._auth = UsmUserData(
             username,
@@ -123,31 +122,31 @@ class APCPDUClient:
         # Cached transport — created once on first use and reused thereafter.
         self._transport_cache: UdpTransportTarget | None = None
 
-    def _preload_dispatch_mibs(self) -> None:
-        """Pre-load all pysnmp MIBs to prevent blocking I/O in the event loop.
+    def _make_fresh_engine(self) -> SnmpEngine:
+        """Construct a new ``SnmpEngine`` with all MIBs pre-loaded.
 
-        Called from ``__init__``, which is invoked via ``async_add_executor_job``
-        so all file I/O stays off the event loop.
+        Does blocking file I/O (engine construction + ``load_modules``) and
+        therefore MUST be called from an executor thread, never from the event
+        loop. ``__init__`` runs inside ``async_add_executor_job`` so the call
+        site there is safe; for later calls use ``run_in_executor``.
 
-        Mirrors the fix applied to the built-in HA ``snmp`` integration in
-        https://github.com/home-assistant/core/pull/118521:
+        MIB pre-load mirrors the fix from HA core PR #118521:
         - Build a ``MibViewController`` around the engine's MIB builder and
           cache it on the engine (pysnmp looks for it there during OID resolution).
         - Call ``load_modules()`` with *no arguments*, which is pysnmp's
           "load everything" form — it discovers and loads every module it ships,
           including the double-underscore instance modules (``__SNMPv2-MIB`` etc.)
           that ``receive_message`` looks up on every received packet.
-
-        After this call ``import_symbols`` always finds modules in its in-memory
-        cache and never falls through to ``os.listdir`` / ``open``.
         """
+        engine = SnmpEngine()
         try:
-            mvc = _mib_view.MibViewController(self._engine.get_mib_builder())
-            self._engine.cache["mibViewController"] = mvc
+            mvc = _mib_view.MibViewController(engine.get_mib_builder())
+            engine.cache["mibViewController"] = mvc
             mvc.mibBuilder.load_modules()
             _LOGGER.debug("pysnmp MIBs pre-loaded — event-loop I/O eliminated")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("MIB pre-load failed (SNMP will still work): %s", err)
+        return engine
 
     async def _transport(self) -> UdpTransportTarget:
         """Return a cached transport target, creating it on first call."""
@@ -370,18 +369,27 @@ class APCPDUClient:
         expected = CMD_IMMEDIATE_ON if state else CMD_IMMEDIATE_OFF
         value = Integer32(expected)
         _LOGGER.debug("SET %s = %s (outlet %s -> %s)", oid, value, outlet, "on" if state else "off")
+
+        # pysnmp's asyncio HLAPI leaves an engine in a state where subsequent
+        # SETs return a "successful" varBinds echo but no UDP packet reaches
+        # the PDU — the first toggle works, every later toggle is a silent
+        # no-op until the integration is reloaded. Invalidating only the
+        # cached transport was not enough. The only reliable workaround is a
+        # brand-new SnmpEngine per write; the long-lived ``self._engine``
+        # stays dedicated to coordinator polling.
+        loop = asyncio.get_running_loop()
+        write_engine = await loop.run_in_executor(None, self._make_fresh_engine)
+
         async with self._lock:
             try:
                 errorIndication, errorStatus, errorIndex, varBinds = await set_cmd(
-                    self._engine, self._auth, await self._transport(), self._context,
+                    write_engine, self._auth, await self._transport(), self._context,
                     ObjectType(ObjectIdentity(oid), value),
                 )
             finally:
-                # Force the next operation to recreate the UDP socket. pysnmp's
-                # asyncio HLAPI can leave the cached transport in a state where
-                # subsequent set_cmd calls return success without putting bytes
-                # on the wire — the first toggle works, every later toggle is a
-                # silent no-op until the integration is reloaded.
+                # The cached transport's UDP socket was registered with
+                # write_engine's dispatcher, which we're about to drop —
+                # force the next operation to create a fresh transport too.
                 self._transport_cache = None
         if errorIndication:
             raise RuntimeError(f"SNMP error: {errorIndication}")
