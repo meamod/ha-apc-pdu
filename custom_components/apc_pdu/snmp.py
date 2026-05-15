@@ -367,17 +367,44 @@ class APCPDUClient:
         if outlet < 1:
             raise ValueError(f"Outlet number must be >= 1, got {outlet}")
         oid = f"{OID_OUTLET_CONTROL}.{outlet}"
-        value = Integer32(CMD_IMMEDIATE_ON if state else CMD_IMMEDIATE_OFF)
+        expected = CMD_IMMEDIATE_ON if state else CMD_IMMEDIATE_OFF
+        value = Integer32(expected)
         _LOGGER.debug("SET %s = %s (outlet %s -> %s)", oid, value, outlet, "on" if state else "off")
         async with self._lock:
-            errorIndication, errorStatus, errorIndex, varBinds = await set_cmd(
-                self._engine, self._auth, await self._transport(), self._context,
-                ObjectType(ObjectIdentity(oid), value),
-            )
+            try:
+                errorIndication, errorStatus, errorIndex, varBinds = await set_cmd(
+                    self._engine, self._auth, await self._transport(), self._context,
+                    ObjectType(ObjectIdentity(oid), value),
+                )
+            finally:
+                # Force the next operation to recreate the UDP socket. pysnmp's
+                # asyncio HLAPI can leave the cached transport in a state where
+                # subsequent set_cmd calls return success without putting bytes
+                # on the wire — the first toggle works, every later toggle is a
+                # silent no-op until the integration is reloaded.
+                self._transport_cache = None
         if errorIndication:
             raise RuntimeError(f"SNMP error: {errorIndication}")
         if errorStatus:
             raise RuntimeError(
                 f"SNMP error: {errorStatus.prettyPrint()} at index {errorIndex}"
+            )
+        if not varBinds:
+            raise RuntimeError(f"SET outlet {outlet} — empty response")
+        _, val = varBinds[0]
+        if isinstance(val, (NoSuchObject, NoSuchInstance, EndOfMibView)):
+            raise RuntimeError(
+                f"SET outlet {outlet} — OID {oid} returned {type(val).__name__}"
+            )
+        try:
+            echoed = int(val)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                f"SET outlet {outlet} — PDU returned non-integer response: {val!r}"
+            )
+        if echoed != expected:
+            raise RuntimeError(
+                f"SET outlet {outlet} — PDU did not echo expected value "
+                f"(sent {expected}, got {echoed})"
             )
         _LOGGER.debug("SET outlet %s -> %s OK", outlet, "on" if state else "off")
